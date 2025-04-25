@@ -11,6 +11,8 @@ __pycache__/
 
 celery_docker
 
+storage/
+
 beack_up_process_audio
 
 audio_files_examples/

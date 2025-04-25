@@ -5,7 +5,7 @@ from app import create_app
 load_dotenv()
 
 # Порт и биндинг
-PORT = os.getenv('PORT', "5020")
+PORT = os.getenv('PORT', "5015")
 
 
 app = create_app()

@@ -23,9 +23,9 @@ async def create_thread():
         return None
 
 
-async def create_run(user_input, thread_id, user_id):
+async def create_run(user_input, thread_id):
     logger.info(
-        f"Запуск нового рана для пользователя {user_id} в потоке {thread_id}")
+        f"Запуск нового рана для пользователя  в потоке {thread_id}")
     try:
         await client.beta.threads.messages.create(
             thread_id=thread_id, role="user", content=user_input)
@@ -41,7 +41,11 @@ async def create_run(user_input, thread_id, user_id):
 
             if run_status.status == "completed":
                 messages = await client.beta.threads.messages.list(thread_id=thread_id)
-                response = messages.data[0].content[0].text.value if messages.data else "Ошибка получения ответа"
+                response = next(
+                    (msg.content[0].text.value for msg in messages.data if msg.role == "assistant"),
+                    "Ассистент не вернул ответ."
+                )
+
                 break
 
             elif run_status.status == "requires_action":

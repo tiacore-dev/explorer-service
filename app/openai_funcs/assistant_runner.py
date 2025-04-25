@@ -1,37 +1,20 @@
-from pathlib import Path
 import json
 import asyncio
 from loguru import logger
 from openai import AsyncOpenAI
 from app.rabbit import publish_task
+from app.openai_funcs.summary import send_final_summary
+from app.openai_funcs.save_load import save_result
 from app.config import Settings
 from app.handlers.parsers import fetch_url
 
 settings = Settings()
 
-QUEUE_NAME = "site_analysis_tasks"
 
 client = AsyncOpenAI(
     api_key=settings.OPENAI_API_KEY
 )
 assistant_id = settings.ASSISTANT_ID
-
-
-STORAGE_DIR = Path("storage")
-STORAGE_DIR.mkdir(exist_ok=True)
-
-
-def save_result(thread_id: str, data: dict):
-    with open(STORAGE_DIR / f"{thread_id}.json", "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def load_result(thread_id: str) -> dict:
-    path = STORAGE_DIR / f"{thread_id}.json"
-    if not path.exists():
-        return {}
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
 
 
 async def create_thread():
@@ -42,6 +25,45 @@ async def create_thread():
     except Exception as e:
         logger.error(f"Ошибка при создании потока: {e}")
         return None
+
+
+def format_final_output(data: list, visited: list, pending: list, max_depth: int) -> str:
+    output = [
+        f"🌐 Обход завершён на глубине {max_depth}. Обработано страниц: {len(visited)}"]
+    output.append("")
+
+    for page in data:
+        url = page.get("url", "")
+        headings = page.get("headings", [])
+        text = page.get("text", [])
+        prices = page.get("prices", [])
+
+        output.append(f"🔹 <{url}>")
+        if headings:
+            output.append("  ▫️ Заголовки:")
+            for h in headings[:3]:
+                output.append(f"    - {h}")
+
+        if text:
+            output.append("  ▫️ Тексты:")
+            for p in text[:2]:
+                output.append(
+                    f"    - {p[:100]}{'...' if len(p) > 100 else ''}")
+
+        if prices:
+            output.append(
+                f"  ▫️ Найдено {len(prices)} цен: {', '.join(prices[:3])}...")
+
+        output.append("")  # Пустая строка между страницами
+
+    output.append(
+        f"🕸 Всего страниц в очереди на момент остановки: {len(pending)}")
+    if pending:
+        output.append("  Остались:")
+        for p in pending[:5]:
+            output.append(f"    - {p}")
+
+    return "\n".join(output)
 
 
 async def run_assistant_step(task_data: dict):
@@ -57,7 +79,14 @@ async def run_assistant_step(task_data: dict):
     if not pending or depth >= max_depth:
         logger.info(
             f"[{thread_id}] Завершено. Достигнута глубина или закончились ссылки.")
-        save_result(thread_id, task_data)
+        save_result(
+            thread_id,
+            data=task_data["data"],
+            visited=task_data["visited"],
+            pending=task_data["pending"],
+            max_depth=task_data["max_depth"]
+        )
+
         return
 
     url = pending.pop(0)
@@ -88,8 +117,9 @@ async def run_assistant_step(task_data: dict):
                 f"[{thread_id}] Run требует действия. Обрабатываем tool_call")
 
             tool_calls = run_status.required_action.submit_tool_outputs.tool_calls
+            tool_outputs = []
+
             for tool in tool_calls:
-                logger.debug(f"[{thread_id}] Tool call: {tool.function.name}")
                 if tool.function.name == "fetch_url":
                     args = json.loads(tool.function.arguments)
                     target_url = args["url"]
@@ -112,26 +142,49 @@ async def run_assistant_step(task_data: dict):
 
                     pending.extend(new_links)
 
-                    await client.beta.threads.runs.submit_tool_outputs(
-                        thread_id=thread_id,
-                        run_id=run.id,
-                        tool_outputs=[{
-                            "tool_call_id": tool.id,
-                            "output": json.dumps(result)
-                        }]
-                    )
+                    tool_outputs.append({
+                        "tool_call_id": tool.id,
+                        "output": json.dumps(result)
+                    })
+
+            # И только потом один вызов
+            await client.beta.threads.runs.submit_tool_outputs(
+                thread_id=thread_id,
+                run_id=run.id,
+                tool_outputs=tool_outputs
+            )
+
             continue
 
         await asyncio.sleep(1)
 
     task_data["depth"] = depth + 1
     task_data["pending"] = pending
+
     logger.info(
         f"[{thread_id}] Завершение шага. Глубина увеличена до {task_data['depth']}")
     logger.info(f"[{thread_id}] Осталось ссылок в pending: {len(pending)}")
 
-    save_result(thread_id, task_data)
+    save_result(
+        thread_id,
+        data=task_data["data"],
+        visited=task_data["visited"],
+        pending=task_data["pending"],
+        max_depth=task_data["max_depth"]
+    )
     logger.info(f"[{thread_id}] Результат сохранён в файл.")
 
-    await publish_task(QUEUE_NAME, task_data)
-    logger.info(f"[{thread_id}] Задача повторно отправлена в очередь.")
+    # 👉 Если pending пустой — завершаем анализ
+    if task_data["depth"] >= task_data["max_depth"]:
+        await send_final_summary(
+            thread_id=thread_id,
+            data=task_data["data"],
+            visited=task_data["visited"],
+            pending=task_data["pending"],
+            max_depth=task_data["max_depth"]
+        )
+        logger.info(
+            f"[{thread_id}] Финальный ассистент вызван для подведения итогов.")
+    else:
+        await publish_task(settings.QUEUE_NAME, task_data)
+        logger.info(f"[{thread_id}] Задача повторно отправлена в очередь.")

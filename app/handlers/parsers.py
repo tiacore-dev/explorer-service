@@ -30,8 +30,15 @@ def fetch_url(url: str) -> dict:
         paragraphs = [p.get_text(strip=True) for p in soup.find_all(
             "p") if len(p.get_text(strip=True)) > 50]
 
-        # Цены (по шаблону ₽ / $ / €)
-        prices = re.findall(r"[\d\s]+(?:₽|\$|€)", html)
+        # После soup = BeautifulSoup(html, "html.parser")
+        text_content = soup.get_text(separator=" ", strip=True)
+
+        # Полностью без захвата групп
+        price_pattern = re.compile(
+            r"(?:от\s*)?(\d[\d\s.,]{0,14}\s*(?:₽|руб\.?|р\.?|\$|€))", re.IGNORECASE
+        )
+
+        prices = price_pattern.findall(text_content)
 
         # Ссылки
         raw_links = [a.get("href") for a in soup.find_all("a", href=True)]

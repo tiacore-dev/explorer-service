@@ -4,35 +4,53 @@ services:
     container_name: rabbitmq
     restart: always
     ports:
-      - "5672:5672"     # основной порт
-      - "15672:15672"   # UI для админки
+      - "5672:5672"     # AMQP
+      - "15672:15672"   # UI
     environment:
       RABBITMQ_DEFAULT_USER: user
       RABBITMQ_DEFAULT_PASS: password
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     networks:
       - explorer_network
-
 
   web:
-    tty: true
-    stdin_open: true
     build: .
-    dns:
-      - 8.8.8.8
-      - 1.1.1.1
+    container_name: explorer-web
+    restart: always
     ports:
       - "${PORT}:${PORT}"
-    depends_on:
-      - aerich
     volumes:
       - .:/app
-    command: >
-       gunicorn -c gunicorn.conf.py run:app
+      - ./storage:/app/storage
+    command: gunicorn -c gunicorn.conf.py run:app
+    depends_on:
+      - rabbitmq
     networks:
       - explorer_network
 
+  worker:
+    build:
+      context: .
+    container_name: explorer-worker
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: on-failure
+    volumes:
+      - ./storage:/app/storage
+    networks:
+      - explorer_network
+    command: >
+      python rabbit_worker.py
 
 
 networks:
   explorer_network:
     driver: bridge
+
+volumes:
+  storage_data:
